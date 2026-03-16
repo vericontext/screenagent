@@ -57,16 +57,29 @@ class AXPerceiver:
     def _find_app_pid(self, app_name: str) -> int | None:
         _ensure_ax_imports()
         workspace = _NSWorkspace.sharedWorkspace()
-        for app in workspace.runningApplications():
-            # Match by localizedName (e.g. "계산기" on Korean macOS)
-            if app.localizedName() == app_name:
+        apps = list(workspace.runningApplications())
+        name_lower = app_name.strip().lower()
+
+        # 1. Case-insensitive exact match on localizedName
+        for app in apps:
+            localized = app.localizedName()
+            if localized and localized.lower() == name_lower:
                 return app.processIdentifier()
-            # Fallback: match by bundle URL basename (e.g. "Calculator.app")
+
+        # 2. Bundle name match (bundle URL basename without .app)
+        for app in apps:
             bundle_url = app.bundleURL()
             if bundle_url:
                 bundle_name = bundle_url.lastPathComponent()
-                if bundle_name and bundle_name.replace(".app", "") == app_name:
+                if bundle_name and bundle_name.replace(".app", "").lower() == name_lower:
                     return app.processIdentifier()
+
+        # 3. Case-insensitive substring match
+        for app in apps:
+            localized = app.localizedName()
+            if localized and name_lower in localized.lower():
+                return app.processIdentifier()
+
         return None
 
     def _read_element(self, element, depth: int = 0, max_depth: int = 10) -> UIElement | None:

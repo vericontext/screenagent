@@ -22,62 +22,56 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """\
 You are a computer-use agent on macOS. You control the screen via the `computer` tool.
 
-## CRITICAL RULES
-- ALWAYS use keyboard shortcuts instead of clicking when possible.
-- NEVER click on Spotlight results — type the name and press Return.
-- NEVER click the same area more than twice. If it didn't work, try something else.
-- When "UI Elements:" text is provided, use it to find exact coordinates of buttons/fields.
-- After EVERY action, check 'Current App:' and 'Window Title:' in the tool result to verify you are in the correct application.
-- If the app changed unexpectedly (see NOTE messages), use Cmd+Tab or Cmd+Space to switch back IMMEDIATELY.
+<rules>
+- Prefer keyboard shortcuts over clicking — they are faster and more reliable.
+- In Spotlight, type the app name and press Return instead of clicking results, because click coordinates often misalign with Spotlight's list.
+- If clicking an area twice didn't work, try a different approach — repeated identical actions rarely succeed.
+- Use "UI Elements:" text when provided to find exact coordinates of buttons and fields.
+- "UI Elements:" may be truncated. If you can't find an element, try Tab/arrow keys or scroll to reveal more.
+- If "UI Elements:" is missing from tool results, accessibility info is unavailable — rely on the screenshot and keyboard navigation.
+- After each action, check 'Current App:' and 'Window Title:' in the tool result to confirm you are in the correct application.
+- If the app changed unexpectedly (NOTE messages), use Cmd+Tab or Cmd+Space to switch back.
 - If a 'No visible change' note appears, your action likely failed — try a different approach.
+- After launching an app, take a screenshot to verify it has loaded before proceeding.
+- If an app is still loading, use the wait action (1-2 seconds) and screenshot again.
+</rules>
 
-## Before EVERY action, state:
-1. OBSERVE: What is currently on screen? What does 'Current App:' say?
-2. RECALL: What have I already tried? Did it work?
-3. PLAN: What will I do next and why?
+<apps>
+Opening apps:
+1. Check 'Current App:' — if the target app is already active, skip to using it.
+2. Press Cmd+Space to open Spotlight.
+3. Type the app name, then press Return.
+4. Take a screenshot to confirm the app has launched and its window is visible before proceeding.
 
-## How to Open Apps (FOLLOW EXACTLY)
-1. Press Cmd+Space (opens Spotlight)
-2. Type the app name (e.g. "Calculator")
-3. Press Return — this opens the top result. DO NOT click.
-4. Wait 1-2 seconds for the app to launch.
+Calculator:
+1. Open via Spotlight (Cmd+Space, type "Calculator", Return).
+2. Press Cmd+A then Delete to clear any existing value.
+3. Type the full expression in one action (e.g. "(123+456)*7-89"). Parentheses work in Basic mode — NEVER switch calculator modes.
+4. Press Return to compute, then read the result from screen.
 
-## How to Use Calculator (CRITICAL)
-- FIRST press Cmd+A then Delete to clear any existing value.
-- THEN type the ENTIRE expression in ONE action (e.g. type "number+number", not digit by digit).
-- Then press Return to compute the result.
-- NEVER click calculator buttons — keyboard is faster and more reliable.
-- NEVER type one digit at a time. Combine everything into one type action.
-
-## How to Use Browser
-1. FIRST check 'Current App:' to confirm you are in the browser.
-2. Cmd+L to focus address bar
-3. Press Cmd+A to select all existing text, then type URL, press Return.
-4. For search: go to https://www.google.com/search?q=QUERY
-5. If the address bar shows an unexpected URL, press Cmd+L, Cmd+A, then type the correct URL.
+Browser:
+1. Confirm 'Current App:' shows the browser.
+2. Cmd+L to focus the address bar, Cmd+A to select all, type the URL, press Return.
+3. For search: navigate to https://www.google.com/search?q=QUERY
+</apps>
 
 ## Multi-Window Recovery
-- If you end up in the wrong app (Finder, Terminal, etc.), press Cmd+Tab to return to the target app.
-- NEVER continue actions without verifying you are in the correct app via 'Current App:' in tool results.
-- If Cmd+Tab doesn't work, use Cmd+Space to search for and reopen the target app.
+- The system automatically brings the target app to the foreground before each action.
+- Still check 'Current App:' after each action — if it shows an unexpected app, the auto-activation may have failed.
+- Use Cmd+Tab or Cmd+Space to return to the target app if needed.
 
-## Recovery Rules
-- If an action produced no visible change, DO NOT repeat it.
-- If the same approach failed twice, try a COMPLETELY different method.
-- If you can't find a UI element, use keyboard navigation (Tab, arrow keys).
-- If stuck for 3+ steps, take a fresh screenshot and reassess.
+<recovery>
+- If an action produced no visible change, do not repeat it — try something different.
+- If you cannot find a UI element, use keyboard navigation (Tab, arrow keys).
+- If stuck after several attempts, reassess the screen and try a fundamentally different approach.
+</recovery>
 
-## macOS Shortcuts
-- Cmd+Space: Spotlight search (open any app)
-- Cmd+Tab: Switch between apps
-- Cmd+L: Browser address bar
-- Cmd+A: Select all (useful to clear fields before typing)
-- Cmd+W: Close window/tab
-- Cmd+Q: Quit app
+<shortcuts>
+Cmd+Space: Spotlight | Cmd+Tab: Switch apps | Cmd+L: Address bar
+Cmd+A: Select all | Cmd+W: Close tab | Cmd+Q: Quit app
+</shortcuts>
 
-## Completion
-- When the task is done, describe what you accomplished and stop.
-- If you cannot complete the task after trying multiple approaches, explain what went wrong.
+When the task is done, describe what you accomplished and stop. If you cannot complete it after multiple approaches, explain what went wrong.
 """
 
 # Computer use image constraints
@@ -216,28 +210,30 @@ class ComputerUseLoop:
             # After typing in Spotlight, Return opens an app — wait for it to launch
             elif lower_combo in ("return", "enter") and self._last_action == "type":
                 # Resolve app name from Spotlight typed text before PID polling
-                if self._spotlight_active and self._spotlight_typed:
+                was_spotlight = self._spotlight_active and bool(self._spotlight_typed)
+                if was_spotlight:
                     resolved = self._resolve_app_name(self._spotlight_typed)
                     self._target_app_name = resolved or self._spotlight_typed
                     logger.info("Spotlight app resolved: %r → %r", self._spotlight_typed, self._target_app_name)
                 self._spotlight_active = False
 
-                old_pid = self._get_frontmost_pid()
-                for _ in range(6):  # poll up to 3 seconds
-                    time.sleep(0.5)
-                    new_pid = self._get_frontmost_pid()
-                    if new_pid and new_pid != old_pid:
-                        self._target_app_pid = new_pid
-                        logger.info("New app detected: PID %d (was %s)", new_pid, old_pid)
-                        break
-                else:
-                    logger.warning("Frontmost app did not change after Return (still PID %s)", old_pid)
-                    # Fallback: find PID by app name
-                    if self._target_app_name:
-                        found_pid = self._ax._find_app_pid(self._target_app_name)
-                        if found_pid:
-                            self._target_app_pid = found_pid
-                            logger.info("Found target app PID by name %r: %d", self._target_app_name, found_pid)
+                if was_spotlight:
+                    old_pid = self._get_frontmost_pid()
+                    for _ in range(6):  # poll up to 3 seconds
+                        time.sleep(0.5)
+                        new_pid = self._get_frontmost_pid()
+                        if new_pid and new_pid != old_pid:
+                            self._target_app_pid = new_pid
+                            logger.info("New app detected: PID %d (was %s)", new_pid, old_pid)
+                            break
+                    else:
+                        logger.warning("Frontmost app did not change after Return (still PID %s)", old_pid)
+                        # Fallback: find PID by app name
+                        if self._target_app_name:
+                            found_pid = self._ax._find_app_pid(self._target_app_name)
+                            if found_pid:
+                                self._target_app_pid = found_pid
+                                logger.info("Found target app PID by name %r: %d", self._target_app_name, found_pid)
             time.sleep(0.2)
             self._last_action = "key"
 
@@ -491,8 +487,25 @@ class ComputerUseLoop:
         return [messages[0], summary_msg, ack_msg] + messages[-16:]
 
     @staticmethod
+    def _is_app_running(app_name: str) -> bool:
+        """Check if an application is currently running."""
+        try:
+            from AppKit import NSWorkspace
+            name_lower = app_name.strip().lower()
+            for app in NSWorkspace.sharedWorkspace().runningApplications():
+                localized = app.localizedName()
+                if localized and name_lower in localized.lower():
+                    return True
+        except Exception:
+            pass
+        return False
+
+    @staticmethod
     def _activate_app(app_name: str) -> None:
-        """Bring the target application to the foreground."""
+        """Bring the target application to the foreground (only if running)."""
+        if not ComputerUseLoop._is_app_running(app_name):
+            logger.debug("Skipping activation — %r is not running", app_name)
+            return
         try:
             subprocess.Popen(
                 ["osascript", "-e", f'tell application "{app_name}" to activate'],
@@ -550,6 +563,17 @@ class ComputerUseLoop:
             # Trim history with action summary to avoid context overflow
             trimmed = self._trim_with_summary(messages)
 
+            # Mark recent user messages for prompt caching
+            cache_count = 0
+            for msg in reversed(trimmed):
+                if msg["role"] == "user" and isinstance(msg["content"], list):
+                    last_block = msg["content"][-1]
+                    if isinstance(last_block, dict) and "cache_control" not in last_block:
+                        last_block["cache_control"] = {"type": "ephemeral"}
+                        cache_count += 1
+                        if cache_count >= 3:
+                            break
+
             # Build API call kwargs
             api_kwargs: dict = dict(
                 model=self._config.model,
@@ -557,7 +581,7 @@ class ComputerUseLoop:
                 system=SYSTEM_PROMPT,
                 tools=tools,
                 messages=trimmed,
-                betas=["computer-use-2025-11-24"],
+                betas=["computer-use-2025-11-24", "prompt-caching-2024-07-31"],
             )
             if self._thinking_supported:
                 api_kwargs["thinking"] = {"type": "enabled", "budget_tokens": 4096}
@@ -615,7 +639,7 @@ class ComputerUseLoop:
                     self._action_log.append(action)
 
                 # Activate target app before GUI actions
-                if action not in ("screenshot", "wait"):
+                if action not in ("screenshot", "wait") and not self._spotlight_active:
                     if app_name:
                         self._activate_app(app_name)
                     elif self._target_app_name:
@@ -672,7 +696,11 @@ class ComputerUseLoop:
                         logger.warning("Repetition detected: %s ×%d", key, repeat_count)
 
                     # AX tree summary
-                    ax_text = self._get_ax_summary(app_name or self._target_app_name)
+                    ax_app = app_name or self._target_app_name
+                    if ax_app and not self._is_app_running(ax_app):
+                        ax_text = None
+                    else:
+                        ax_text = self._get_ax_summary(ax_app)
                     if ax_text:
                         content_parts.append({"type": "text", "text": f"UI Elements:\n{ax_text}"})
 

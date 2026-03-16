@@ -29,14 +29,37 @@ class UIElement:
     element_id: str = ""
     children: list[UIElement] = field(default_factory=list)
 
-    def to_text(self, indent: int = 0, max_siblings: int = 5) -> str:
+    # Structural roles that can be flattened (skip node, render children only)
+    _STRUCTURAL_ROLES = frozenset({
+        "AXGroup", "AXScrollArea", "AXSplitGroup", "AXLayoutArea",
+        "AXLayoutItem", "AXList", "AXOutline", "AXBrowser",
+    })
+    # Interactive roles that should always include coordinates
+    _INTERACTIVE_ROLES = frozenset({
+        "AXButton", "AXTextField", "AXTextArea", "AXLink",
+        "AXCheckBox", "AXRadioButton", "AXPopUpButton",
+        "AXComboBox", "AXSlider", "AXMenuItem", "AXMenuButton",
+        "AXTab", "AXIncrementor", "AXSearchField", "AXStaticText",
+    })
+
+    def to_text(self, indent: int = 0, max_siblings: int = 8) -> str:
+        # Flatten structural nodes that have no title/value — render children only
+        if (self.role in self._STRUCTURAL_ROLES
+                and not self.title and not self.value
+                and self.children):
+            lines: list[str] = []
+            for child in self.children:
+                lines.append(child.to_text(indent, max_siblings))
+            return "\n".join(lines)
+
         prefix = "  " * indent
         parts = [self.role]
         if self.title:
             parts.append(f'"{self.title}"')
         if self.value:
             parts.append(f"value={self.value!r}")
-        if self.rect:
+        # Only include coordinates for interactive elements
+        if self.rect and self.role in self._INTERACTIVE_ROLES:
             parts.append(f"({self.rect.x:.0f},{self.rect.y:.0f} {self.rect.width:.0f}x{self.rect.height:.0f})")
         line = f"{prefix}{' '.join(parts)}"
         lines = [line]

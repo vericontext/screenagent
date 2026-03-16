@@ -883,8 +883,8 @@ wheels = [
 ]
 
 [[package]]
-name = "screenagent"
-version = "0.3.0"
+name = "screenagent-ai"
+version = "0.3.3"
 source = { editable = "." }
 dependencies = [
     { name = "anthropic" },
