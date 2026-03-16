@@ -96,9 +96,13 @@ def cmd_run(args: argparse.Namespace) -> int:
         stream=sys.stderr,
     )
 
-    from screenagent.agent.loop import AgentLoop
+    if args.computer_use:
+        from screenagent.agent.computer_use import ComputerUseLoop
+        loop = ComputerUseLoop(config=config)
+    else:
+        from screenagent.agent.loop import AgentLoop
+        loop = AgentLoop(config=config)
 
-    loop = AgentLoop(config=config)
     try:
         result = loop.run(instruction, app_name=args.app)
     except Exception as exc:
@@ -360,6 +364,7 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--max-steps", type=int, default=None, help="Maximum agent steps")
     p_run.add_argument("--model", default=None, help="Claude model to use")
     p_run.add_argument("--dry-run", action="store_true", help="Validate config without executing")
+    p_run.add_argument("--computer-use", action="store_true", help="Use Claude's native computer-use tool (more accurate clicks)")
 
     # --- screenshot ---
     p_ss = sub.add_parser("screenshot", help="Capture a screenshot")
