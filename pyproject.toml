@@ -3,8 +3,8 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [project]
-name = "screenagent"
-version = "0.3.0"
+name = "screenagent-ai"
+version = "0.3.2"
 description = "Computer Use SDK for Python — build screen-controlling AI agents in a few lines of code"
 requires-python = ">=3.11"
 license = "MIT"
@@ -25,9 +25,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/screenagent/screenagent"
-Repository = "https://github.com/screenagent/screenagent"
-Issues = "https://github.com/screenagent/screenagent/issues"
+Homepage = "https://github.com/vericontext/screenagent"
+Repository = "https://github.com/vericontext/screenagent"
+Issues = "https://github.com/vericontext/screenagent/issues"
 
 [project.scripts]
 screenagent = "screenagent.cli:main"
