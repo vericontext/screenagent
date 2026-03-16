@@ -20,7 +20,7 @@ class CDPPerceiver:
         self._ws: Any = None
         self._msg_id = 0
 
-    async def connect(self, port: int | None = None, *, max_retries: int = 5) -> None:
+    async def connect(self, port: int | None = None, *, max_retries: int = 2) -> None:
         if port is not None:
             self._port = port
 
@@ -46,7 +46,7 @@ class CDPPerceiver:
                 ws_url = page_target["webSocketDebuggerUrl"]
             except Exception as e:
                 last_error = e
-                logger.debug("CDP connect attempt %d failed: %s", attempt + 1, e)
+                logger.info("CDP connect attempt %d failed: %s", attempt + 1, e)
                 continue
 
             self._ws = await websockets.connect(
@@ -66,8 +66,15 @@ class CDPPerceiver:
 
     async def _reconnect(self) -> None:
         """Reconnect to a page target (e.g. after navigation changes the page)."""
+        if self._ws:
+            try:
+                await self._ws.close()
+            except Exception:
+                pass
         self._ws = None
-        await self.connect(self._port)
+        # After navigation, wait for the new page target to appear
+        await asyncio.sleep(2)
+        await self.connect(self._port, max_retries=4)
 
     async def _send(self, method: str, params: dict | None = None) -> dict:
         if self._ws is None:

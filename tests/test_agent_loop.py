@@ -28,7 +28,7 @@ class TestToolDefinitions:
 
     def test_expected_tools_present(self):
         names = {t["name"] for t in TOOLS}
-        expected = {"screenshot", "get_ui_tree", "click", "type_text", "key_press", "scroll", "navigate", "open_url", "done"}
+        expected = {"screenshot", "get_ui_tree", "click", "type_text", "key_press", "scroll", "navigate", "open_url", "browser_eval", "done"}
         assert expected == names
 
 

@@ -14,3 +14,4 @@ venv/
 *.png
 *.tmp
 .DS_Store
+DEMO.md

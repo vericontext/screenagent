@@ -102,6 +102,20 @@ TOOLS: list[dict] = [
         },
     },
     {
+        "name": "browser_eval",
+        "description": "Execute JavaScript in the browser page via CDP. Use this to interact with page elements directly (e.g. fill input fields, click buttons, read text). Returns the result of the expression. Requires Chrome with remote debugging.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "expression": {
+                    "type": "string",
+                    "description": "JavaScript expression to evaluate in the browser page context",
+                },
+            },
+            "required": ["expression"],
+        },
+    },
+    {
         "name": "done",
         "description": "Call this when the task is complete. Provide a summary of what was accomplished.",
         "input_schema": {

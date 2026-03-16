@@ -127,6 +127,7 @@ class TestRunDryRun:
 
     def test_dry_run_no_key(self, capsys, monkeypatch):
         monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+        monkeypatch.setattr("screenagent.config._load_dotenv", lambda: None)
         assert run_cli("--output", "json", "run", "do something", "--dry-run") == 0
         captured = capsys.readouterr()
         data = json.loads(captured.out)

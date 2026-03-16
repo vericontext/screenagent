@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import base64
 import logging
+import subprocess
 import time
 
 import anthropic
@@ -21,14 +22,23 @@ logger = logging.getLogger(__name__)
 SYSTEM_PROMPT = """\
 You are a GUI automation agent running on macOS. You can see the screen and interact with any application using mouse clicks, keyboard input, and browser navigation.
 
+Strategy:
+1. If the task involves searching on a website, use open_url with the search URL directly. Examples:
+   - Google search: open_url("https://www.google.com/search?q=YOUR_QUERY")
+   - YouTube search: open_url("https://www.youtube.com/results?search_query=YOUR_QUERY")
+   - Any site: open_url("https://SITE.com") then use browser_eval to fill the search form.
+2. If the task mentions navigating to a website, use open_url FIRST.
+3. Use browser_eval for precise page interactions (filling inputs, clicking buttons, reading text). It is more reliable than click+type for browser tasks.
+4. Fall back to click/type_text/key_press only when browser_eval is unavailable or for non-browser apps.
+5. After navigating or completing the action, check the screenshot. If the expected page/result is visible, call done immediately. Do NOT click on random elements after the task is already accomplished.
+
 Guidelines:
-- Analyze the screenshot and UI tree to understand the current state before acting.
-- Click on specific coordinates visible in the screenshot.
-- Use navigate or open_url for browser URLs; use click + type_text for form inputs.
-- open_url works without Chrome DevTools Protocol — use it if navigate fails.
-- After typing in a search box, press Enter (key_press with key="return") to submit.
-- Call the done tool when the task is complete.
-- If something doesn't work, try an alternative approach.
+- IMPORTANT: For click coordinates, pass x and y as separate numeric values. Correct: {"x": 640, "y": 197}. WRONG: {"x": "640, 197", "y": 197}.
+- Use open_url to navigate to a URL — it always works.
+- Use browser_eval to interact with page elements directly, e.g.: browser_eval("document.querySelector('textarea').value = 'query'; document.querySelector('form').submit()")
+- If the same action fails twice, try a completely different approach.
+- If content is not visible on screen, use scroll to find it.
+- Call done as soon as the task objective is achieved. For search tasks, seeing the search results page means the task is done.
 """
 
 # Max conversation turns to keep (excluding system + initial instruction)
@@ -42,9 +52,11 @@ class AgentLoop:
         self._perceiver = CompositePerceiver(cdp_port=self._config.cdp_port)
         self._actor = CGEventActor()
         self._cdp_actor: CDPActor | None = None
+        self._cdp_actor_checked = False
 
     async def _get_cdp_actor(self) -> CDPActor | None:
-        if self._cdp_actor is None:
+        if self._cdp_actor is None and not self._cdp_actor_checked:
+            self._cdp_actor_checked = True
             if await self._perceiver._ensure_cdp():
                 self._cdp_actor = CDPActor(self._perceiver.cdp)
         return self._cdp_actor
@@ -77,14 +89,18 @@ class AgentLoop:
         """Parse a coordinate value, handling cases where model sends 'x, y' as a single string."""
         if isinstance(val, (int, float)):
             return float(val)
+        import re
         s = str(val).strip()
-        # If model sent "338, 58" as x, take the first number
-        if "," in s:
-            s = s.split(",")[0].strip()
+        # Extract the first number (int or float) from the string
+        m = re.search(r"-?\d+(?:\.\d+)?", s)
+        if m:
+            return float(m.group())
         return float(s)
 
-    async def _open_url_via_keyboard(self, url: str) -> ToolResult:
+    async def _open_url_via_keyboard(self, url: str, app_name: str = "Google Chrome") -> ToolResult:
         """Navigate browser to a URL using keyboard shortcuts (Cmd+L → Cmd+A → type → Enter)."""
+        # Ensure browser is in foreground before sending keyboard events
+        self._activate_app(app_name)
         # Focus address bar
         self._actor.key_press("l", ["command"])
         await asyncio.sleep(0.3)
@@ -97,11 +113,22 @@ class AgentLoop:
         # Press Enter to navigate
         self._actor.key_press("return", None)
         await asyncio.sleep(2)  # Wait for page load
+        # Reconnect CDP since page navigation invalidates the old websocket
+        try:
+            await self._perceiver.cdp._reconnect()
+            self._perceiver._cdp_connected = True
+        except Exception as exc:
+            logger.debug("CDP reconnect after open_url failed: %s", exc)
+            self._perceiver._cdp_connected = False
         png = self._perceiver.screenshot()
         return ToolResult(output=f"Navigated to {url} (via keyboard)", screenshot_png=png)
 
-    async def _dispatch_tool(self, name: str, args: dict) -> ToolResult:
+    async def _dispatch_tool(self, name: str, args: dict, app_name: str = "Google Chrome") -> ToolResult:
         """Execute a tool and return the result."""
+        # Ensure target app is in foreground for GUI-interactive tools
+        if name in ("click", "type_text", "key_press", "scroll", "open_url"):
+            self._activate_app(app_name)
+
         if name == "screenshot":
             png = self._perceiver.screenshot()
             return ToolResult(output="Screenshot captured.", screenshot_png=png)
@@ -142,7 +169,23 @@ class AgentLoop:
 
         elif name == "open_url":
             url = str(args["url"])
-            return await self._open_url_via_keyboard(url)
+            # Try CDP navigate first (faster and more reliable), fall back to keyboard
+            cdp_actor = await self._get_cdp_actor()
+            if cdp_actor is not None:
+                try:
+                    await cdp_actor.navigate(url)
+                    await asyncio.sleep(2)
+                    # Reconnect CDP to the new page
+                    try:
+                        await self._perceiver.cdp._reconnect()
+                        self._perceiver._cdp_connected = True
+                    except Exception:
+                        self._perceiver._cdp_connected = False
+                    png = self._perceiver.screenshot()
+                    return ToolResult(output=f"Navigated to {url}", screenshot_png=png)
+                except Exception as exc:
+                    logger.info("CDP navigate failed for open_url (%s), falling back to keyboard", exc)
+            return await self._open_url_via_keyboard(url, app_name)
 
         elif name == "navigate":
             cdp_actor = await self._get_cdp_actor()
@@ -157,6 +200,27 @@ class AgentLoop:
             await asyncio.sleep(1)
             png = self._perceiver.screenshot()
             return ToolResult(output=f"Navigated to {args['url']}", screenshot_png=png)
+
+        elif name == "browser_eval":
+            cdp_actor = await self._get_cdp_actor()
+            if cdp_actor is None:
+                return ToolResult(error="CDP not available. Chrome must be running with --remote-debugging-port.")
+            try:
+                result_str = await self._perceiver.cdp.evaluate_js(str(args["expression"]))
+            except Exception as exc:
+                # JS may have triggered navigation (form submit, link click) which closes WebSocket.
+                # Wait for page load and reconnect, then capture screenshot.
+                logger.info("browser_eval caused navigation or error: %s — reconnecting", exc)
+                try:
+                    await self._perceiver.cdp._reconnect()
+                except Exception:
+                    pass
+                await asyncio.sleep(1)
+                png = self._perceiver.screenshot()
+                return ToolResult(output="JS executed (page may have navigated).", screenshot_png=png)
+            await asyncio.sleep(0.5)
+            png = self._perceiver.screenshot()
+            return ToolResult(output=f"Result: {result_str}", screenshot_png=png)
 
         elif name == "done":
             return ToolResult(output=args["summary"], done=True)
@@ -192,9 +256,24 @@ class AgentLoop:
         """Run the agent loop synchronously. Returns the final summary."""
         return asyncio.run(self.arun(instruction, app_name))
 
+    @staticmethod
+    def _activate_app(app_name: str) -> None:
+        """Bring the target application to the foreground using osascript."""
+        try:
+            subprocess.Popen(
+                ["osascript", "-e", f'tell application "{app_name}" to activate'],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            time.sleep(0.5)
+        except Exception as exc:
+            logger.warning("Could not activate app %s: %s", app_name, exc)
+
     async def arun(self, instruction: str, app_name: str = "Google Chrome") -> str:
         """Run the agent loop asynchronously. Returns the final summary."""
         logger.info("Starting agent with instruction: %s", instruction)
+
+        # Bring target app to foreground
+        self._activate_app(app_name)
 
         # Initial perception
         state = await self._perceiver._perceive_async(app_name, include_screenshot=True)
@@ -237,7 +316,11 @@ class AgentLoop:
                     continue
 
                 logger.info("Tool call: %s(%s)", block.name, block.input)
-                result = await self._dispatch_tool(block.name, block.input)
+                try:
+                    result = await self._dispatch_tool(block.name, block.input, app_name)
+                except Exception as exc:
+                    logger.warning("Tool %s failed: %s", block.name, exc)
+                    result = ToolResult(error=str(exc))
 
                 tool_results.append({
                     "type": "tool_result",

@@ -21,16 +21,25 @@ class CompositePerceiver:
         self._cdp = CDPPerceiver(port=cdp_port)
         self._screenshot = ScreenshotPerceiver()
         self._cdp_connected = False
+        self._cdp_failed = False
         self._cdp_port = cdp_port
 
     async def _ensure_cdp(self) -> bool:
         if self._cdp_connected:
             return True
+        if self._cdp_failed:
+            return False
         try:
             await self._cdp.connect(self._cdp_port)
             self._cdp_connected = True
+            self._was_ever_connected = True
             return True
         except ConnectionError:
+            # Only mark as permanently failed on first connect attempt.
+            # If we were previously connected (_cdp_connected was set then cleared),
+            # allow future retry.
+            if not hasattr(self, '_was_ever_connected'):
+                self._cdp_failed = True
             logger.debug("CDP not available, skipping browser perception")
             return False
 
@@ -68,7 +77,8 @@ class CompositePerceiver:
                     state.url = await self._cdp.get_page_url()
                     state.dom_summary = await self._cdp.get_dom()
                 except Exception as e:
-                    logger.warning("CDP error: %s", e)
+                    logger.warning("CDP error: %s — will retry on next perception", e)
+                    self._cdp_connected = False
 
         # Screenshot fallback / supplement
         if include_screenshot:
@@ -78,7 +88,11 @@ class CompositePerceiver:
                 else:
                     state.screenshot_png = self._screenshot.screenshot()
             except Exception as e:
-                logger.warning("Screenshot error: %s", e)
+                logger.warning("CDP screenshot error, falling back to screencapture: %s", e)
+                try:
+                    state.screenshot_png = self._screenshot.screenshot()
+                except Exception as e2:
+                    logger.warning("Screenshot error: %s", e2)
 
         return state
 
