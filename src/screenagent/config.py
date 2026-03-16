@@ -34,7 +34,8 @@ class Config:
     anthropic_api_key: str = ""
     cdp_port: int = 9222
     max_steps: int = 20
-    model: str = "claude-haiku-4-5-20251001"
+    model: str = "claude-sonnet-4-6"
+    computer_use: bool = True
 
     @classmethod
     def from_env(cls) -> Config:
@@ -43,7 +44,8 @@ class Config:
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
             cdp_port=int(os.environ.get("CDP_PORT", "9222")),
             max_steps=int(os.environ.get("AGENT_MAX_STEPS", "20")),
-            model=os.environ.get("AGENT_MODEL", "claude-haiku-4-5-20251001"),
+            model=os.environ.get("AGENT_MODEL", "claude-sonnet-4-6"),
+            computer_use=os.environ.get("AGENT_COMPUTER_USE", "true").lower() in ("true", "1", "yes"),
         )
 
 

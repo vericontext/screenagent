@@ -96,7 +96,14 @@ def cmd_run(args: argparse.Namespace) -> int:
         stream=sys.stderr,
     )
 
+    # CLI flags override config default
+    use_computer = config.computer_use
     if args.computer_use:
+        use_computer = True
+    elif args.no_computer_use:
+        use_computer = False
+
+    if use_computer:
         from screenagent.agent.computer_use import ComputerUseLoop
         loop = ComputerUseLoop(config=config)
     else:
@@ -364,7 +371,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_run.add_argument("--max-steps", type=int, default=None, help="Maximum agent steps")
     p_run.add_argument("--model", default=None, help="Claude model to use")
     p_run.add_argument("--dry-run", action="store_true", help="Validate config without executing")
-    p_run.add_argument("--computer-use", action="store_true", help="Use Claude's native computer-use tool (more accurate clicks)")
+    p_run.add_argument("--computer-use", action="store_true", help="Force computer-use mode (default: on)")
+    p_run.add_argument("--no-computer-use", action="store_true", help="Disable computer-use, use legacy tool-use mode")
 
     # --- screenshot ---
     p_ss = sub.add_parser("screenshot", help="Capture a screenshot")
