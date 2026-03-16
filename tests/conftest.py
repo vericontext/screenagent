@@ -14,7 +14,7 @@ def sample_config():
         anthropic_api_key="test-key",
         cdp_port=9222,
         max_steps=5,
-        model="claude-sonnet-4-6",
+        model="claude-haiku-4-5-20251001",
     )
 
 
