@@ -1,0 +1,37 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "screenagent"
+version = "0.1.0"
+description = "macOS GUI Automation Framework using Accessibility API, CDP, and Claude Vision"
+requires-python = ">=3.11"
+dependencies = [
+    "pyobjc-framework-Cocoa>=10.0",
+    "pyobjc-framework-Quartz>=10.0",
+    "pyobjc-framework-ApplicationServices>=10.0",
+    "anthropic>=0.40.0",
+    "websockets>=13.0",
+    "mcp>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.24.0",
+]
+
+[project.scripts]
+screenagent = "screenagent.cli:main"
+screenagent-mcp = "screenagent.mcp.server:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/screenagent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+markers = [
+    "integration: marks tests requiring system permissions and running apps",
+]
+asyncio_mode = "auto"
