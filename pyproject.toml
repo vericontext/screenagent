@@ -4,9 +4,11 @@ build-backend = "hatchling.build"
 
 [project]
 name = "screenagent"
-version = "0.1.0"
-description = "macOS GUI Automation Framework using Accessibility API, CDP, and Claude Vision"
+version = "0.3.0"
+description = "Computer Use SDK for Python — build screen-controlling AI agents in a few lines of code"
 requires-python = ">=3.11"
+license = "MIT"
+readme = "README.md"
 dependencies = [
     "pyobjc-framework-Cocoa>=10.0",
     "pyobjc-framework-Quartz>=10.0",
@@ -21,6 +23,11 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.24.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/screenagent/screenagent"
+Repository = "https://github.com/screenagent/screenagent"
+Issues = "https://github.com/screenagent/screenagent/issues"
 
 [project.scripts]
 screenagent = "screenagent.cli:main"
