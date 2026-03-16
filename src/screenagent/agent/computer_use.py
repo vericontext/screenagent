@@ -27,9 +27,12 @@ You are a computer-use agent on macOS. You control the screen via the `computer`
 - NEVER click on Spotlight results — type the name and press Return.
 - NEVER click the same area more than twice. If it didn't work, try something else.
 - When "UI Elements:" text is provided, use it to find exact coordinates of buttons/fields.
+- After EVERY action, check 'Current App:' and 'Window Title:' in the tool result to verify you are in the correct application.
+- If the app changed unexpectedly (see NOTE messages), use Cmd+Tab or Cmd+Space to switch back IMMEDIATELY.
+- If a 'No visible change' note appears, your action likely failed — try a different approach.
 
 ## Before EVERY action, state:
-1. OBSERVE: What is currently on screen?
+1. OBSERVE: What is currently on screen? What does 'Current App:' say?
 2. RECALL: What have I already tried? Did it work?
 3. PLAN: What will I do next and why?
 
@@ -40,15 +43,23 @@ You are a computer-use agent on macOS. You control the screen via the `computer`
 4. Wait 1-2 seconds for the app to launch.
 
 ## How to Use Calculator (CRITICAL)
-- ALWAYS type the ENTIRE expression in ONE action: type "256+512"
+- FIRST press Cmd+A then Delete to clear any existing value.
+- THEN type the ENTIRE expression in ONE action (e.g. type "number+number", not digit by digit).
 - Then press Return to compute the result.
 - NEVER click calculator buttons — keyboard is faster and more reliable.
 - NEVER type one digit at a time. Combine everything into one type action.
 
 ## How to Use Browser
-1. Cmd+L to focus address bar
-2. Type URL, press Return
-3. For search: go to https://www.google.com/search?q=QUERY
+1. FIRST check 'Current App:' to confirm you are in the browser.
+2. Cmd+L to focus address bar
+3. Press Cmd+A to select all existing text, then type URL, press Return.
+4. For search: go to https://www.google.com/search?q=QUERY
+5. If the address bar shows an unexpected URL, press Cmd+L, Cmd+A, then type the correct URL.
+
+## Multi-Window Recovery
+- If you end up in the wrong app (Finder, Terminal, etc.), press Cmd+Tab to return to the target app.
+- NEVER continue actions without verifying you are in the correct app via 'Current App:' in tool results.
+- If Cmd+Tab doesn't work, use Cmd+Space to search for and reopen the target app.
 
 ## Recovery Rules
 - If an action produced no visible change, DO NOT repeat it.
@@ -60,6 +71,7 @@ You are a computer-use agent on macOS. You control the screen via the `computer`
 - Cmd+Space: Spotlight search (open any app)
 - Cmd+Tab: Switch between apps
 - Cmd+L: Browser address bar
+- Cmd+A: Select all (useful to clear fields before typing)
 - Cmd+W: Close window/tab
 - Cmd+Q: Quit app
 
@@ -102,8 +114,11 @@ class ComputerUseLoop:
         self._screenshot = ScreenshotPerceiver()
         self._ax = AXPerceiver()
         self._actor = CGEventActor()
-        self._action_log: list[str] = []
+        self._action_log: list[str] = []  # human-readable action descriptions
+        self._action_keys: list[str] = []  # compact keys for repetition detection
         self._last_action: str = ""  # track previous action type for context
+        self._prev_app: str | None = None
+        self._prev_window: str | None = None
         self._target_app_pid: int | None = None  # PID of app launched via Spotlight
         self._host_pid: int | None = self._get_frontmost_pid()  # PID of host (IDE/terminal)
         self._thinking_supported: bool = True  # will auto-disable on first failure
@@ -339,6 +354,21 @@ class ComputerUseLoop:
         return None
 
     @staticmethod
+    def _get_window_title() -> str | None:
+        """Get the title of the front window via AppleScript."""
+        try:
+            result = subprocess.run(
+                ["osascript", "-e",
+                 'tell application "System Events" to get name of front window of first application process whose frontmost is true'],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
     def _get_frontmost_pid() -> int | None:
         """Get PID of the frontmost application using NSWorkspace."""
         try:
@@ -404,7 +434,7 @@ class ComputerUseLoop:
                 if tree:
                     text = tree.to_text()
                     logger.info("AX tree for %s: %d chars", app_name, len(text))
-                    return text[:2000]
+                    return text[:4000]
             except Exception as exc:
                 logger.debug("AX tree failed for %s: %s", app_name, exc)
 
@@ -415,7 +445,7 @@ class ComputerUseLoop:
                 if tree:
                     text = tree.to_text()
                     logger.info("AX tree for target PID %d: %d chars", self._target_app_pid, len(text))
-                    return text[:2000]
+                    return text[:4000]
             except Exception as exc:
                 logger.debug("AX tree failed for target PID %d: %s", self._target_app_pid, exc)
 
@@ -427,7 +457,7 @@ class ComputerUseLoop:
                 if tree:
                     text = tree.to_text()
                     logger.info("AX tree for frontmost PID %d: %d chars", pid, len(text))
-                    return text[:2000]
+                    return text[:4000]
             except Exception as exc:
                 logger.debug("AX tree failed for PID %d: %s", pid, exc)
 
@@ -438,7 +468,7 @@ class ComputerUseLoop:
                 if tree:
                     text = tree.to_text()
                     logger.info("AX tree for frontmost PID %d (host): %d chars", pid, len(text))
-                    return text[:2000]
+                    return text[:4000]
             except Exception as exc:
                 logger.debug("AX tree failed for PID %d: %s", pid, exc)
 
@@ -571,7 +601,18 @@ class ComputerUseLoop:
 
                 # Track action for repetition detection
                 key = self._action_key(action, block.input)
-                self._action_log.append(key)
+                self._action_keys.append(key)
+
+                # Human-readable action description for history summary
+                if action == "type":
+                    self._action_log.append(f"typed: {block.input.get('text', '')}")
+                elif action == "key":
+                    self._action_log.append(f"pressed: {block.input.get('text', '')}")
+                elif "coordinate" in block.input:
+                    c = block.input["coordinate"]
+                    self._action_log.append(f"{action} at ({c[0]}, {c[1]})")
+                else:
+                    self._action_log.append(action)
 
                 # Activate target app before GUI actions
                 if action not in ("screenshot", "wait"):
@@ -592,16 +633,41 @@ class ComputerUseLoop:
                         "is_error": True,
                     })
                 else:
-                    # Build content parts: warning + AX tree + screenshot
+                    # Build content parts: context + warning + AX tree + screenshot
                     content_parts: list[dict] = []
 
-                    # Repetition warning
-                    recent = self._action_log[-5:]
+                    # Current app / window context
+                    current_app = self._get_frontmost_app()
+                    window_title = self._get_window_title()
+                    context_lines: list[str] = []
+                    if current_app:
+                        context_lines.append(f"Current App: {current_app}")
+                    if window_title:
+                        context_lines.append(f"Window Title: {window_title}")
+
+                    # State change detection
+                    if self._prev_app and current_app and current_app != self._prev_app:
+                        context_lines.append(f"NOTE: App changed from '{self._prev_app}' to '{current_app}'")
+                    if self._prev_window and window_title and window_title != self._prev_window:
+                        context_lines.append(f"NOTE: Window changed to '{window_title}'")
+                    if (action in ("left_click", "type", "key", "double_click")
+                            and self._prev_app and current_app == self._prev_app
+                            and self._prev_window and window_title == self._prev_window):
+                        context_lines.append("NOTE: No visible window change detected after this action.")
+
+                    self._prev_app = current_app
+                    self._prev_window = window_title
+
+                    if context_lines:
+                        content_parts.append({"type": "text", "text": "\n".join(context_lines)})
+
+                    # Repetition warning (threshold: 2)
+                    recent = self._action_keys[-5:]
                     repeat_count = recent.count(key)
-                    if repeat_count >= 3:
+                    if repeat_count >= 2:
                         content_parts.append({
                             "type": "text",
-                            "text": f"WARNING: You have attempted '{action}' {repeat_count} times recently with no apparent change. Try a completely different approach.",
+                            "text": f"WARNING: You have attempted '{action}' {repeat_count} times recently. This is NOT working. You MUST try a COMPLETELY different approach.",
                         })
                         logger.warning("Repetition detected: %s ×%d", key, repeat_count)
 

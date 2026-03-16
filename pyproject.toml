@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "screenagent-ai"
-version = "0.3.2"
+version = "0.3.3"
 description = "Computer Use SDK for Python — build screen-controlling AI agents in a few lines of code"
 requires-python = ">=3.11"
 license = "MIT"
