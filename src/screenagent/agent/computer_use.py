@@ -14,18 +14,58 @@ import anthropic
 from screenagent.types import ToolResult
 from screenagent.config import Config
 from screenagent.perception.screenshot import ScreenshotPerceiver
+from screenagent.perception.ax import AXPerceiver
 from screenagent.action.cgevent import CGEventActor
 
 logger = logging.getLogger(__name__)
 
 SYSTEM_PROMPT = """\
-You are a computer use agent running on macOS. You control the screen via mouse clicks, keyboard input, and screenshots.
+You are a computer-use agent on macOS. You control the screen via the `computer` tool.
 
-Strategy:
-- For browser tasks: use the address bar (Cmd+L) to navigate, then interact with the page.
-- For search tasks: navigate directly to search URL (e.g. https://www.google.com/search?q=QUERY).
-- Take a screenshot first to understand the current state.
-- After completing the task, report what you accomplished.
+## CRITICAL RULES
+- ALWAYS use keyboard shortcuts instead of clicking when possible.
+- NEVER click on Spotlight results — type the name and press Return.
+- NEVER click the same area more than twice. If it didn't work, try something else.
+- When "UI Elements:" text is provided, use it to find exact coordinates of buttons/fields.
+
+## Before EVERY action, state:
+1. OBSERVE: What is currently on screen?
+2. RECALL: What have I already tried? Did it work?
+3. PLAN: What will I do next and why?
+
+## How to Open Apps (FOLLOW EXACTLY)
+1. Press Cmd+Space (opens Spotlight)
+2. Type the app name (e.g. "Calculator")
+3. Press Return — this opens the top result. DO NOT click.
+4. Wait 1-2 seconds for the app to launch.
+
+## How to Use Calculator (CRITICAL)
+- ALWAYS type the ENTIRE expression in ONE action: type "256+512"
+- Then press Return to compute the result.
+- NEVER click calculator buttons — keyboard is faster and more reliable.
+- NEVER type one digit at a time. Combine everything into one type action.
+
+## How to Use Browser
+1. Cmd+L to focus address bar
+2. Type URL, press Return
+3. For search: go to https://www.google.com/search?q=QUERY
+
+## Recovery Rules
+- If an action produced no visible change, DO NOT repeat it.
+- If the same approach failed twice, try a COMPLETELY different method.
+- If you can't find a UI element, use keyboard navigation (Tab, arrow keys).
+- If stuck for 3+ steps, take a fresh screenshot and reassess.
+
+## macOS Shortcuts
+- Cmd+Space: Spotlight search (open any app)
+- Cmd+Tab: Switch between apps
+- Cmd+L: Browser address bar
+- Cmd+W: Close window/tab
+- Cmd+Q: Quit app
+
+## Completion
+- When the task is done, describe what you accomplished and stop.
+- If you cannot complete the task after trying multiple approaches, explain what went wrong.
 """
 
 # Computer use image constraints
@@ -60,7 +100,16 @@ class ComputerUseLoop:
         self._config = config or Config.from_env()
         self._client = anthropic.Anthropic(api_key=self._config.anthropic_api_key)
         self._screenshot = ScreenshotPerceiver()
+        self._ax = AXPerceiver()
         self._actor = CGEventActor()
+        self._action_log: list[str] = []
+        self._last_action: str = ""  # track previous action type for context
+        self._target_app_pid: int | None = None  # PID of app launched via Spotlight
+        self._host_pid: int | None = self._get_frontmost_pid()  # PID of host (IDE/terminal)
+        self._thinking_supported: bool = True  # will auto-disable on first failure
+        self._spotlight_active: bool = False
+        self._spotlight_typed: str = ""
+        self._target_app_name: str | None = None
 
         # Screen dimensions
         self._screen_w, self._screen_h = _get_screen_size()
@@ -132,13 +181,50 @@ class ComputerUseLoop:
 
         elif action == "type":
             text = params.get("text", "")
+            if self._spotlight_active:
+                self._spotlight_typed = text  # last type is the app name
             self._actor.type_text(text)
             time.sleep(0.1)
+            self._last_action = "type"
 
         elif action == "key":
             key_combo = params.get("text", "")
             self._execute_key(key_combo)
+            # Spotlight needs extra time to appear after Cmd+Space
+            lower_combo = key_combo.lower()
+            if "space" in lower_combo and ("cmd" in lower_combo or "command" in lower_combo or "super" in lower_combo or "meta" in lower_combo):
+                self._spotlight_active = True
+                self._spotlight_typed = ""
+                time.sleep(0.5)
+            elif lower_combo in ("escape", "esc"):
+                self._spotlight_active = False
+            # After typing in Spotlight, Return opens an app — wait for it to launch
+            elif lower_combo in ("return", "enter") and self._last_action == "type":
+                # Resolve app name from Spotlight typed text before PID polling
+                if self._spotlight_active and self._spotlight_typed:
+                    resolved = self._resolve_app_name(self._spotlight_typed)
+                    self._target_app_name = resolved or self._spotlight_typed
+                    logger.info("Spotlight app resolved: %r → %r", self._spotlight_typed, self._target_app_name)
+                self._spotlight_active = False
+
+                old_pid = self._get_frontmost_pid()
+                for _ in range(6):  # poll up to 3 seconds
+                    time.sleep(0.5)
+                    new_pid = self._get_frontmost_pid()
+                    if new_pid and new_pid != old_pid:
+                        self._target_app_pid = new_pid
+                        logger.info("New app detected: PID %d (was %s)", new_pid, old_pid)
+                        break
+                else:
+                    logger.warning("Frontmost app did not change after Return (still PID %s)", old_pid)
+                    # Fallback: find PID by app name
+                    if self._target_app_name:
+                        found_pid = self._ax._find_app_pid(self._target_app_name)
+                        if found_pid:
+                            self._target_app_pid = found_pid
+                            logger.info("Found target app PID by name %r: %d", self._target_app_name, found_pid)
             time.sleep(0.2)
+            self._last_action = "key"
 
         elif action == "mouse_move":
             coord = params.get("coordinate", [0, 0])
@@ -223,6 +309,157 @@ class ComputerUseLoop:
         if key:
             self._actor.key_press(key, modifiers if modifiers else None)
 
+    def _action_key(self, action: str, params: dict) -> str:
+        """Create a hashable key for an action to detect repetition.
+
+        Coordinates are rounded to the nearest 20px so near-miss clicks
+        (e.g. [1130, 633] vs [1130, 635]) are treated as the same action.
+        """
+        if "coordinate" in params:
+            c = params["coordinate"]
+            # Round to nearest 20px grid for fuzzy matching
+            rx, ry = round(c[0] / 20) * 20, round(c[1] / 20) * 20
+            return f"{action}@{rx},{ry}"
+        if "text" in params:
+            return f"{action}:{params['text']}"
+        return action
+
+    @staticmethod
+    def _get_frontmost_app() -> str | None:
+        """Get the name of the frontmost application via AppleScript."""
+        try:
+            result = subprocess.run(
+                ["osascript", "-e", 'tell application "System Events" to get name of first application process whose frontmost is true'],
+                capture_output=True, text=True, timeout=3,
+            )
+            if result.returncode == 0 and result.stdout.strip():
+                return result.stdout.strip()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _get_frontmost_pid() -> int | None:
+        """Get PID of the frontmost application using NSWorkspace."""
+        try:
+            from AppKit import NSWorkspace
+            front_app = NSWorkspace.sharedWorkspace().frontmostApplication()
+            if front_app:
+                return front_app.processIdentifier()
+        except Exception:
+            pass
+        return None
+
+    @staticmethod
+    def _resolve_app_name(typed: str) -> str | None:
+        """Resolve a Spotlight-typed string to a running application's localized name.
+
+        Matching priority: exact (case-insensitive) → bundle name → substring.
+        """
+        try:
+            from AppKit import NSWorkspace
+            apps = NSWorkspace.sharedWorkspace().runningApplications()
+            typed_lower = typed.strip().lower()
+            # 1. Exact match on localizedName (case-insensitive)
+            for app in apps:
+                name = app.localizedName()
+                if name and name.lower() == typed_lower:
+                    return name
+            # 2. Bundle name match (e.g., "chrome" → "Google Chrome" via bundle id)
+            for app in apps:
+                bid = app.bundleIdentifier() or ""
+                # Last component of bundle id, e.g. com.google.Chrome → chrome
+                bundle_short = bid.rsplit(".", 1)[-1].lower() if bid else ""
+                if bundle_short == typed_lower:
+                    return app.localizedName()
+            # 3. Substring match (e.g., "chrome" in "Google Chrome")
+            for app in apps:
+                name = app.localizedName()
+                if name and typed_lower in name.lower():
+                    return name
+        except Exception as exc:
+            logger.debug("_resolve_app_name failed: %s", exc)
+        return None
+
+    @staticmethod
+    def _activate_pid(pid: int) -> bool:
+        """Activate (bring to front) the application with the given PID."""
+        try:
+            from AppKit import NSWorkspace, NSRunningApplication
+            for app in NSWorkspace.sharedWorkspace().runningApplications():
+                if app.processIdentifier() == pid:
+                    app.activateWithOptions_(1 << 1)  # NSApplicationActivateIgnoringOtherApps
+                    time.sleep(0.3)
+                    return True
+        except Exception as exc:
+            logger.debug("Failed to activate PID %d: %s", pid, exc)
+        return False
+
+    def _get_ax_summary(self, app_name: str | None) -> str | None:
+        """Get AX tree summary for the given app (or frontmost), or None on failure."""
+        # Strategy 1: If app_name given, try name-based lookup
+        if app_name:
+            try:
+                tree = self._ax.get_ui_tree(app_name)
+                if tree:
+                    text = tree.to_text()
+                    logger.info("AX tree for %s: %d chars", app_name, len(text))
+                    return text[:2000]
+            except Exception as exc:
+                logger.debug("AX tree failed for %s: %s", app_name, exc)
+
+        # Strategy 2: Use tracked target app PID (launched via Spotlight)
+        if self._target_app_pid:
+            try:
+                tree = self._ax.get_ui_tree_by_pid(self._target_app_pid)
+                if tree:
+                    text = tree.to_text()
+                    logger.info("AX tree for target PID %d: %d chars", self._target_app_pid, len(text))
+                    return text[:2000]
+            except Exception as exc:
+                logger.debug("AX tree failed for target PID %d: %s", self._target_app_pid, exc)
+
+        # Strategy 3: Use frontmost app PID (skip if it's the host IDE)
+        pid = self._get_frontmost_pid()
+        if pid and pid != self._host_pid:
+            try:
+                tree = self._ax.get_ui_tree_by_pid(pid)
+                if tree:
+                    text = tree.to_text()
+                    logger.info("AX tree for frontmost PID %d: %d chars", pid, len(text))
+                    return text[:2000]
+            except Exception as exc:
+                logger.debug("AX tree failed for PID %d: %s", pid, exc)
+
+        # Strategy 4: Fallback — use frontmost PID even if it's the host
+        if pid:
+            try:
+                tree = self._ax.get_ui_tree_by_pid(pid)
+                if tree:
+                    text = tree.to_text()
+                    logger.info("AX tree for frontmost PID %d (host): %d chars", pid, len(text))
+                    return text[:2000]
+            except Exception as exc:
+                logger.debug("AX tree failed for PID %d: %s", pid, exc)
+
+        return None
+
+    def _trim_with_summary(self, messages: list[dict]) -> list[dict]:
+        """Trim message history while preserving an action summary."""
+        if len(messages) <= 20:
+            return messages
+
+        n_dropped = len(messages) - 19
+        summary_lines = [f"[Previous {n_dropped // 2} steps summarized]"]
+        for entry in self._action_log[: n_dropped // 2]:
+            summary_lines.append(f"- {entry}")
+        summary_text = "\n".join(summary_lines)
+
+        summary_msg = {"role": "user", "content": [{"type": "text", "text": summary_text}]}
+        ack_msg = {"role": "assistant", "content": [{"type": "text", "text": "Understood, I'll build on what was already tried."}]}
+
+        return [messages[0], summary_msg, ack_msg] + messages[-16:]
+
     @staticmethod
     def _activate_app(app_name: str) -> None:
         """Bring the target application to the foreground."""
@@ -235,15 +472,16 @@ class ComputerUseLoop:
         except Exception as exc:
             logger.warning("Could not activate app %s: %s", app_name, exc)
 
-    def run(self, instruction: str, app_name: str = "Google Chrome") -> str:
+    def run(self, instruction: str, app_name: str | None = None) -> str:
         """Run synchronously."""
         return asyncio.run(self.arun(instruction, app_name))
 
-    async def arun(self, instruction: str, app_name: str = "Google Chrome") -> str:
+    async def arun(self, instruction: str, app_name: str | None = None) -> str:
         """Run the computer use agent loop."""
         logger.info("Starting computer-use agent: %s", instruction)
 
-        self._activate_app(app_name)
+        if app_name:
+            self._activate_app(app_name)
         await asyncio.sleep(0.5)
 
         # Take initial screenshot
@@ -279,26 +517,47 @@ class ComputerUseLoop:
         for step in range(self._config.max_steps):
             logger.info("Step %d/%d", step + 1, self._config.max_steps)
 
-            # Trim history to avoid context overflow
-            trimmed = messages
-            if len(messages) > 20:
-                trimmed = [messages[0]] + messages[-18:]
+            # Trim history with action summary to avoid context overflow
+            trimmed = self._trim_with_summary(messages)
 
-            response = self._client.beta.messages.create(
+            # Build API call kwargs
+            api_kwargs: dict = dict(
                 model=self._config.model,
-                max_tokens=4096,
+                max_tokens=16384,
                 system=SYSTEM_PROMPT,
                 tools=tools,
                 messages=trimmed,
                 betas=["computer-use-2025-11-24"],
             )
+            if self._thinking_supported:
+                api_kwargs["thinking"] = {"type": "enabled", "budget_tokens": 4096}
+
+            try:
+                response = self._client.beta.messages.create(**api_kwargs)
+            except Exception as exc:
+                if self._thinking_supported:
+                    logger.warning("Extended thinking failed, disabling: %s", exc)
+                    self._thinking_supported = False
+                    api_kwargs.pop("thinking", None)
+                    api_kwargs["max_tokens"] = 4096
+                    response = self._client.beta.messages.create(**api_kwargs)
+                else:
+                    raise
 
             assistant_content = response.content
-            messages.append({"role": "assistant", "content": assistant_content})
+            # Strip thinking blocks to avoid API errors on re-send
+            content_for_history = [
+                b for b in assistant_content
+                if getattr(b, "type", None) not in ("thinking", "redacted_thinking")
+            ]
+            messages.append({"role": "assistant", "content": content_for_history})
 
             # If model finished without tool use
             if response.stop_reason == "end_turn":
-                text_parts = [b.text for b in assistant_content if hasattr(b, "text")]
+                text_parts = [
+                    b.text for b in assistant_content
+                    if getattr(b, "type", None) == "text"
+                ]
                 return "\n".join(text_parts) if text_parts else "Agent finished."
 
             # Process tool uses
@@ -310,9 +569,18 @@ class ComputerUseLoop:
                 action = block.input.get("action", "")
                 logger.info("Action: %s %s", action, {k: v for k, v in block.input.items() if k != "action"})
 
-                # Activate app before GUI actions
+                # Track action for repetition detection
+                key = self._action_key(action, block.input)
+                self._action_log.append(key)
+
+                # Activate target app before GUI actions
                 if action not in ("screenshot", "wait"):
-                    self._activate_app(app_name)
+                    if app_name:
+                        self._activate_app(app_name)
+                    elif self._target_app_name:
+                        self._activate_app(self._target_app_name)
+                    elif self._target_app_pid:
+                        self._activate_pid(self._target_app_pid)
 
                 error = self._dispatch_action(action, block.input)
 
@@ -323,39 +591,40 @@ class ComputerUseLoop:
                         "content": error,
                         "is_error": True,
                     })
-                elif action == "screenshot":
-                    # Return screenshot as image
-                    screenshot_b64 = self._take_screenshot_b64()
-                    tool_results.append({
-                        "type": "tool_result",
-                        "tool_use_id": block.id,
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/png",
-                                    "data": screenshot_b64,
-                                },
-                            },
-                        ],
-                    })
                 else:
-                    # For non-screenshot actions, take a screenshot and return it
+                    # Build content parts: warning + AX tree + screenshot
+                    content_parts: list[dict] = []
+
+                    # Repetition warning
+                    recent = self._action_log[-5:]
+                    repeat_count = recent.count(key)
+                    if repeat_count >= 3:
+                        content_parts.append({
+                            "type": "text",
+                            "text": f"WARNING: You have attempted '{action}' {repeat_count} times recently with no apparent change. Try a completely different approach.",
+                        })
+                        logger.warning("Repetition detected: %s ×%d", key, repeat_count)
+
+                    # AX tree summary
+                    ax_text = self._get_ax_summary(app_name or self._target_app_name)
+                    if ax_text:
+                        content_parts.append({"type": "text", "text": f"UI Elements:\n{ax_text}"})
+
+                    # Screenshot
                     screenshot_b64 = self._take_screenshot_b64()
+                    content_parts.append({
+                        "type": "image",
+                        "source": {
+                            "type": "base64",
+                            "media_type": "image/png",
+                            "data": screenshot_b64,
+                        },
+                    })
+
                     tool_results.append({
                         "type": "tool_result",
                         "tool_use_id": block.id,
-                        "content": [
-                            {
-                                "type": "image",
-                                "source": {
-                                    "type": "base64",
-                                    "media_type": "image/png",
-                                    "data": screenshot_b64,
-                                },
-                            },
-                        ],
+                        "content": content_parts,
                     })
 
             messages.append({"role": "user", "content": tool_results})
