@@ -563,15 +563,22 @@ class ComputerUseLoop:
             # Trim history with action summary to avoid context overflow
             trimmed = self._trim_with_summary(messages)
 
-            # Mark recent user messages for prompt caching
+            # Mark recent user messages for prompt caching (max 2 to stay under API limit of 4)
+            # First, clear old cache_control markers
+            for msg in trimmed:
+                if msg["role"] == "user" and isinstance(msg["content"], list):
+                    for block in msg["content"]:
+                        if isinstance(block, dict):
+                            block.pop("cache_control", None)
+            # Then mark the last 2 user messages
             cache_count = 0
             for msg in reversed(trimmed):
                 if msg["role"] == "user" and isinstance(msg["content"], list):
                     last_block = msg["content"][-1]
-                    if isinstance(last_block, dict) and "cache_control" not in last_block:
+                    if isinstance(last_block, dict):
                         last_block["cache_control"] = {"type": "ephemeral"}
                         cache_count += 1
-                        if cache_count >= 3:
+                        if cache_count >= 2:
                             break
 
             # Build API call kwargs
