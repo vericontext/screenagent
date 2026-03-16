@@ -97,10 +97,11 @@ class AgentLoop:
             return float(m.group())
         return float(s)
 
-    async def _open_url_via_keyboard(self, url: str, app_name: str = "Google Chrome") -> ToolResult:
+    async def _open_url_via_keyboard(self, url: str, app_name: str | None = None) -> ToolResult:
         """Navigate browser to a URL using keyboard shortcuts (Cmd+L → Cmd+A → type → Enter)."""
         # Ensure browser is in foreground before sending keyboard events
-        self._activate_app(app_name)
+        if app_name:
+            self._activate_app(app_name)
         # Focus address bar
         self._actor.key_press("l", ["command"])
         await asyncio.sleep(0.3)
@@ -123,10 +124,10 @@ class AgentLoop:
         png = self._perceiver.screenshot()
         return ToolResult(output=f"Navigated to {url} (via keyboard)", screenshot_png=png)
 
-    async def _dispatch_tool(self, name: str, args: dict, app_name: str = "Google Chrome") -> ToolResult:
+    async def _dispatch_tool(self, name: str, args: dict, app_name: str | None = None) -> ToolResult:
         """Execute a tool and return the result."""
         # Ensure target app is in foreground for GUI-interactive tools
-        if name in ("click", "type_text", "key_press", "scroll", "open_url"):
+        if app_name and name in ("click", "type_text", "key_press", "scroll", "open_url"):
             self._activate_app(app_name)
 
         if name == "screenshot":
@@ -252,7 +253,7 @@ class AgentLoop:
             return messages
         return [messages[0]] + messages[-(MAX_HISTORY):]
 
-    def run(self, instruction: str, app_name: str = "Google Chrome") -> str:
+    def run(self, instruction: str, app_name: str | None = None) -> str:
         """Run the agent loop synchronously. Returns the final summary."""
         return asyncio.run(self.arun(instruction, app_name))
 
@@ -268,12 +269,13 @@ class AgentLoop:
         except Exception as exc:
             logger.warning("Could not activate app %s: %s", app_name, exc)
 
-    async def arun(self, instruction: str, app_name: str = "Google Chrome") -> str:
+    async def arun(self, instruction: str, app_name: str | None = None) -> str:
         """Run the agent loop asynchronously. Returns the final summary."""
         logger.info("Starting agent with instruction: %s", instruction)
 
         # Bring target app to foreground
-        self._activate_app(app_name)
+        if app_name:
+            self._activate_app(app_name)
 
         # Initial perception
         state = await self._perceiver._perceive_async(app_name, include_screenshot=True)

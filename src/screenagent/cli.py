@@ -366,7 +366,7 @@ def build_parser() -> argparse.ArgumentParser:
     # --- run ---
     p_run = sub.add_parser("run", help="Execute an agent loop")
     p_run.add_argument("instruction", help="Natural-language task instruction")
-    p_run.add_argument("--app", default="Google Chrome", help="Target application (default: Google Chrome)")
+    p_run.add_argument("--app", default=None, help="Target application (default: None — agent decides)")
     p_run.add_argument("--cdp-port", type=int, default=None, help="Chrome DevTools Protocol port")
     p_run.add_argument("--max-steps", type=int, default=None, help="Maximum agent steps")
     p_run.add_argument("--model", default=None, help="Claude model to use")

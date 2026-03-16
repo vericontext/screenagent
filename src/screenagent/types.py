@@ -29,7 +29,7 @@ class UIElement:
     element_id: str = ""
     children: list[UIElement] = field(default_factory=list)
 
-    def to_text(self, indent: int = 0) -> str:
+    def to_text(self, indent: int = 0, max_siblings: int = 5) -> str:
         prefix = "  " * indent
         parts = [self.role]
         if self.title:
@@ -40,8 +40,15 @@ class UIElement:
             parts.append(f"({self.rect.x:.0f},{self.rect.y:.0f} {self.rect.width:.0f}x{self.rect.height:.0f})")
         line = f"{prefix}{' '.join(parts)}"
         lines = [line]
-        for child in self.children:
-            lines.append(child.to_text(indent + 1))
+        if len(self.children) > max_siblings:
+            for child in self.children[:3]:
+                lines.append(child.to_text(indent + 1, max_siblings))
+            remaining = len(self.children) - 3
+            sample_role = self.children[3].role
+            lines.append(f"{'  ' * (indent + 1)}... and {remaining} more {sample_role} elements")
+        else:
+            for child in self.children:
+                lines.append(child.to_text(indent + 1, max_siblings))
         return "\n".join(lines)
 
 
@@ -72,3 +79,12 @@ class ToolResult:
     error: str = ""
     screenshot_png: bytes | None = None
     done: bool = False
+
+
+@dataclass
+class AgentResult:
+    """Structured result from an Agent.run() call."""
+
+    summary: str
+    steps: int = 0
+    success: bool = True

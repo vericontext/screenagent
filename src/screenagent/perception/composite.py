@@ -43,7 +43,7 @@ class CompositePerceiver:
             logger.debug("CDP not available, skipping browser perception")
             return False
 
-    def perceive(self, app_name: str, include_screenshot: bool = True) -> ScreenState:
+    def perceive(self, app_name: str | None, include_screenshot: bool = True) -> ScreenState:
         """Synchronous entry point — runs async parts internally."""
         loop = None
         try:
@@ -59,31 +59,32 @@ class CompositePerceiver:
         else:
             return asyncio.run(self._perceive_async(app_name, include_screenshot))
 
-    async def _perceive_async(self, app_name: str, include_screenshot: bool) -> ScreenState:
-        state = ScreenState(app_name=app_name)
+    async def _perceive_async(self, app_name: str | None, include_screenshot: bool) -> ScreenState:
+        state = ScreenState(app_name=app_name or "")
 
-        # Try AX tree
-        try:
-            state.ui_tree = self._ax.get_ui_tree(app_name)
-        except PermissionError as e:
-            logger.warning("AX permission error: %s", e)
-        except Exception as e:
-            logger.warning("AX error: %s", e)
+        if app_name:
+            # Try AX tree
+            try:
+                state.ui_tree = self._ax.get_ui_tree(app_name)
+            except PermissionError as e:
+                logger.warning("AX permission error: %s", e)
+            except Exception as e:
+                logger.warning("AX error: %s", e)
 
-        # Try CDP for browser apps
-        if app_name in BROWSER_APPS:
-            if await self._ensure_cdp():
-                try:
-                    state.url = await self._cdp.get_page_url()
-                    state.dom_summary = await self._cdp.get_dom()
-                except Exception as e:
-                    logger.warning("CDP error: %s — will retry on next perception", e)
-                    self._cdp_connected = False
+            # Try CDP for browser apps
+            if app_name in BROWSER_APPS:
+                if await self._ensure_cdp():
+                    try:
+                        state.url = await self._cdp.get_page_url()
+                        state.dom_summary = await self._cdp.get_dom()
+                    except Exception as e:
+                        logger.warning("CDP error: %s — will retry on next perception", e)
+                        self._cdp_connected = False
 
         # Screenshot fallback / supplement
         if include_screenshot:
             try:
-                if app_name in BROWSER_APPS and self._cdp_connected:
+                if app_name and app_name in BROWSER_APPS and self._cdp_connected:
                     state.screenshot_png = await self._cdp.capture_screenshot()
                 else:
                     state.screenshot_png = self._screenshot.screenshot()

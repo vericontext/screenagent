@@ -58,8 +58,15 @@ class AXPerceiver:
         _ensure_ax_imports()
         workspace = _NSWorkspace.sharedWorkspace()
         for app in workspace.runningApplications():
+            # Match by localizedName (e.g. "계산기" on Korean macOS)
             if app.localizedName() == app_name:
                 return app.processIdentifier()
+            # Fallback: match by bundle URL basename (e.g. "Calculator.app")
+            bundle_url = app.bundleURL()
+            if bundle_url:
+                bundle_name = bundle_url.lastPathComponent()
+                if bundle_name and bundle_name.replace(".app", "") == app_name:
+                    return app.processIdentifier()
         return None
 
     def _read_element(self, element, depth: int = 0, max_depth: int = 10) -> UIElement | None:
@@ -109,6 +116,13 @@ class AXPerceiver:
             logger.warning("App %r not found in running applications", app_name)
             return None
 
+        _ensure_ax_imports()
+        app_ref = _AXUIElementCreateApplication(pid)
+        return self._read_element(app_ref)
+
+    def get_ui_tree_by_pid(self, pid: int) -> UIElement | None:
+        """Get the AX UI tree for a process by its PID directly."""
+        self._check_trusted()
         _ensure_ax_imports()
         app_ref = _AXUIElementCreateApplication(pid)
         return self._read_element(app_ref)
